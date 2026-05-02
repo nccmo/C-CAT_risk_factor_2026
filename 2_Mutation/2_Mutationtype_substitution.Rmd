@@ -1,0 +1,221 @@
+---
+title: "Mutation type and base substitution analysis"
+author: "Yosuke Mizukami"
+date: "2025-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+```{r library, message=FALSE, warning=TRUE}
+library(tidyverse)
+library(broom)
+library(cowplot)
+theme_set(theme_cowplot())
+library(RColorBrewer)
+library(patchwork)
+library(logging)
+library(lawstat)
+library(MASS)
+```
+
+```{r source}
+source("../../util/R/utils.R")
+source("../../util/R/figure.R")
+source("../../util/R/colors.R")
+source("../../util/R/readin.R")
+```
+
+```{r make directory}
+# make directory
+outdir0 <- "result/2_C_CAT/1_pancan/1_mutation/5_1_driver_enrichment_q005"
+outdir_table <- str_glue("{outdir0}/table")
+dir.create(outdir_table, recursive = TRUE, showWarnings = FALSE)
+outdir_pdf <- str_glue("{outdir0}/pdf")
+dir.create(outdir_pdf, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Prepare driver list
+
+```{r read data}
+all_cancertypes_fct <- unique(df$cancertype_CCAT) %>% sort()
+
+df_fisher_merged <- read_tsv(str_glue("{outdir_table}/driver_mutation_enrichment_univariate_multivariate.tsv"))
+
+df_combinations <- df_fisher_merged %>%
+  dplyr::select(Gene, cancertype) 
+```
+
+# Mutation type and base substitution analysis
+
+```{r mutation type and base substitution analysis}
+ls_df_res_mutation_type <- vector("list", nrow(df_combinations))
+
+for (i in seq_len(nrow(df_combinations))) {
+  # i <- 10
+  gene_i <- df_combinations$Gene[i]
+  cancer_i <- df_combinations$cancertype[i]
+  
+  ever_samples <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    filter(smoking_status_2groups == "Ever") %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  never_samples <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    filter(smoking_status_2groups == "Never") %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  df_ever_tmp <- df_mut %>%
+    filter(Marker == gene_i) %>%
+    filter(Tumor_Sample_Barcode %in% ever_samples)
+  df_ever_fsindel <- df_ever_tmp %>%
+    filter(vep_Variant_Classification %in% c("Frame_Shift_Ins", "Frame_Shift_Del"))
+  df_ever_inframe <- df_ever_tmp %>%
+    filter(vep_Variant_Classification %in% c("In_Frame_Ins", "In_Frame_Del"))
+  df_ever_missense <- df_ever_tmp %>%
+    filter(vep_Variant_Classification == "Missense_Mutation")
+  df_ever_nonsense <- df_ever_tmp %>%
+    filter(vep_Variant_Classification == "Nonsense_Mutation")
+  df_ever_ss <- df_ever_tmp %>%
+    filter(vep_Variant_Classification == "Splice_Site")
+  df_ever_ns <- df_ever_tmp %>%
+    filter(vep_Variant_Classification == "Nonstop_Mutation")
+  df_ever_tss <- df_ever_tmp %>%
+    filter(vep_Variant_Classification == "Translation_Start_Site")
+  df_ever_mut <- df_ever_tmp %>%
+    filter(vep_Variant_Classification %in% c("Missense_Mutation", "Nonsense_Mutation", "Splice_Site", "Nonstop_Mutation",
+                                             "Translation_Start_Site", "Frame_Shift_Ins", "Frame_Shift_Del", "In_Frame_Ins", "In_Frame_Del"))
+  
+  df_never_tmp <- df_mut %>%
+    filter(Marker == gene_i) %>%
+    filter(Tumor_Sample_Barcode %in% never_samples)
+  df_never_fsindel <- df_never_tmp %>%
+    filter(vep_Variant_Classification %in% c("Frame_Shift_Ins", "Frame_Shift_Del"))
+  df_never_inframe <- df_never_tmp %>%
+    filter(vep_Variant_Classification %in% c("In_Frame_Ins", "In_Frame_Del"))
+  df_never_missense <- df_never_tmp %>%
+    filter(vep_Variant_Classification == "Missense_Mutation")
+  df_never_nonsense <- df_never_tmp %>%
+    filter(vep_Variant_Classification == "Nonsense_Mutation")
+  df_never_ss <- df_never_tmp %>%
+    filter(vep_Variant_Classification == "Splice_Site")
+  df_never_ns <- df_never_tmp %>%
+    filter(vep_Variant_Classification == "Nonstop_Mutation")
+  df_never_tss <- df_never_tmp %>%
+    filter(vep_Variant_Classification == "Translation_Start_Site")
+  df_never_mut <- df_never_tmp %>%
+    filter(vep_Variant_Classification %in% c("Missense_Mutation", "Nonsense_Mutation", "Splice_Site", "Nonstop_Mutation",
+                                             "Translation_Start_Site", "Frame_Shift_Ins", "Frame_Shift_Del", "In_Frame_Ins", "In_Frame_Del"))
+
+  fisher_nonsense <- fisher.test(
+    matrix(c(
+      nrow(df_ever_nonsense), nrow(df_never_nonsense),
+      nrow(df_ever_mut) - nrow(df_ever_nonsense), nrow(df_never_mut) - nrow(df_never_nonsense)
+    ), nrow = 2)
+  )
+
+  offset <- 0.01
+  or_nonsense <- ((nrow(df_ever_nonsense) + offset) * (nrow(df_never_mut) - nrow(df_never_nonsense) + offset)) /
+                ((nrow(df_ever_mut) - nrow(df_ever_nonsense) + offset) * (nrow(df_never_nonsense) + offset))
+
+  ls_df_res_mutation_type[[i]] <- tibble(
+    Gene = gene_i,
+    cancertype = cancer_i,
+    num_fsindel_ever = nrow(df_ever_fsindel),
+    num_inframe_ever = nrow(df_ever_inframe),
+    num_missense_ever = nrow(df_ever_missense),
+    num_nonsense_ever = nrow(df_ever_nonsense),
+    num_ss_ever = nrow(df_ever_ss),
+    num_ns_ever = nrow(df_ever_ns),
+    num_tss_ever = nrow(df_ever_tss),
+    num_mut_ever = nrow(df_ever_mut),
+    num_fsindel_never = nrow(df_never_fsindel),
+    num_inframe_never = nrow(df_never_inframe),
+    num_missense_never = nrow(df_never_missense),
+    num_nonsense_never = nrow(df_never_nonsense),
+    num_ss_never = nrow(df_never_ss),
+    num_ns_never = nrow(df_never_ns),
+    num_tss_never = nrow(df_never_tss),
+    num_mut_never = nrow(df_never_mut),
+    fisher_or_nonsense = or_nonsense,
+    fisher_p_nonsense = fisher_nonsense$p.value
+  )
+}
+
+df_fisher_mutationtype <- bind_rows(ls_df_res_mutation_type)
+
+ls_df_res_nucleotide_change <- vector("list", nrow(df_combinations))
+for (i in seq_len(nrow(df_combinations))) {
+  # i <- 10
+  gene_i <- df_combinations$Gene[i]
+  cancer_i <- df_combinations$cancertype[i]
+
+  ever_samples <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    filter(smoking_status_2groups == "Ever") %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  never_samples <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    filter(smoking_status_2groups == "Never") %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  
+  df_ever_tmp <- df_mut %>%
+    mutate(nucleotide_change = str_glue("{Ref}>{Alt}")) %>%
+    filter(Marker == gene_i) %>%
+    filter(Tumor_Sample_Barcode %in% ever_samples)
+  df_never_tmp <- df_mut %>%
+    mutate(nucleotide_change = str_glue("{Ref}>{Alt}")) %>%
+    filter(Marker == gene_i) %>%
+    filter(Tumor_Sample_Barcode %in% never_samples)  
+  df_ever_CtoA <- df_ever_tmp %>%
+    filter(nucleotide_change %in% c("C>A", "G>T"))
+  df_never_CtoA <- df_never_tmp %>%
+    filter(nucleotide_change %in% c("C>A", "G>T"))
+
+  fisher_ca <- fisher.test(
+    matrix(c(
+      nrow(df_ever_CtoA), nrow(df_never_CtoA),
+      nrow(df_ever_tmp) - nrow(df_ever_CtoA), nrow(df_never_tmp) - nrow(df_never_CtoA)
+    ), nrow = 2)
+  )
+  offset <- 0.01
+  a <- nrow(df_ever_CtoA)
+  b <- nrow(df_never_CtoA)
+  c <- nrow(df_ever_tmp) - a
+  d <- nrow(df_never_tmp) - b
+  or_ca <- ((a + offset) * (d + offset)) / ((b + offset) * (c + offset))
+  
+  ls_df_res_nucleotide_change[[i]] <- tibble(
+    Gene = gene_i,
+    cancertype = cancer_i,
+    num_ca_ever = nrow(df_ever_CtoA),
+    num_ca_never = nrow(df_never_CtoA),
+    fisher_or_ca = or_ca,
+    fisher_p_ca = fisher_ca$p.value
+  )
+}
+
+df_res_nucleotide_change <- bind_rows(ls_df_res_nucleotide_change)
+
+df_res <- df_fisher_merged %>%
+  left_join(df_fisher_mutationtype, by = c("cancertype", "Gene")) %>%
+  left_join(df_res_nucleotide_change, by = c("cancertype", "Gene"))
+
+df_res %>%
+  write_tsv(str_glue("{outdir_table}/driverSNVs_multivariate.offset.tsv"))
+
+```
+
+
+```{r sessioninfo}
+
+sessionInfo()
+
+```

@@ -1,0 +1,271 @@
+---
+title: "Prognosis analysis"
+author: "Yosuke Mizukami"
+date: "2025-09-09"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+```{r library, message=FALSE, warning=TRUE}
+library(tidyverse)
+library(readxl)
+library(cowplot)
+theme_set(theme_cowplot())
+library(RColorBrewer)
+library(logging)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(rlang)
+library(patchwork)
+```
+
+```{r make directory}
+# make directory
+outdir0 <- "result/2_C_CAT/1_pancan/4_prognosis"
+outdir_table <- str_glue("{outdir0}/table")
+dir.create(outdir_table, recursive = TRUE, showWarnings = FALSE)
+outdir_pdf <- str_glue("{outdir0}/pdf")
+dir.create(outdir_pdf, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r source}
+source("../../util/R/utils.R")
+source("../../util/R/survival.R")
+source("../../util/R/colors.R")
+source("../../util/R/readin.R")
+```
+
+# Prepare data
+
+```{r read data}
+df_avail <- df %>%
+  mutate(smoking_status_2groups = factor(smoking_status_2groups, levels = c("Never", "Ever"))) %>% 
+  filter(PS_group != "NA") %>%
+  filter(!is.na(OS_months) | OS_months != "NA") %>%
+  mutate(OS_months = as.numeric(OS_months)) %>% 
+  mutate(OS = as.numeric(OS))
+
+all_cancertypes_fct <- df_avail %>% 
+  filter(cancertype_CCAT != "NA" | is.na(cancertype_CCAT)) %>%
+  pull(cancertype_CCAT) %>% 
+  unique() %>% 
+  sort()
+
+```
+
+# Kaplan-Meier analysis for smoking 
+
+```{r smoking}
+
+# Function to draw survival plot for smoking status
+DrawSurvplotSmoking <- function(df_sample, xlimit, mytitle) {
+  df_tmp <- df_sample %>% 
+    mutate(smoking_status_2groups = factor(smoking_status_2groups, levels = c("Never", "Ever")))
+  ever_n <- nrow(df_tmp[df_tmp$smoking_status_2groups == "Ever", ])
+  never_n <- nrow(df_tmp[df_tmp$smoking_status_2groups == "Never", ])
+
+  mysurvfit_smoking <- coxph(Surv(OS_months, OS) ~ smoking_status_2groups + alcohol_status + Age + PS_group, data = as.data.frame(df_tmp))
+  mysurvfit_for_plot <- survfit(Surv(OS_months, OS) ~ smoking_status_2groups, data = as.data.frame(df_tmp))
+  label_text <- str_glue("EvsN P= {attach_astk(summary(mysurvfit_smoking)$coefficients[1, 5])}")
+
+  ggsurvplot(
+    mysurvfit_for_plot,
+    data = df_tmp,
+    pval = FALSE,
+    risk.table = TRUE,
+    title = str_glue("{mytitle}"),
+    subtitle = str_glue("Ever: {ever_n}, Never: {never_n}"),
+    caption = str_glue("{label_text}"),
+    font.subtitle = c(size = 12),
+    font.caption = c(size = 12),
+    xlim = c(0, xlimit),
+    break.x.by = 10,
+    palette = c("#66C2A5", "#FC8D62"),
+    censor = FALSE,
+    xlab = "Months",
+    ylab = "OS probability",
+    legend = "none"
+  )$plot +
+    theme(aspect.ratio = 1) +
+    scale_x_continuous(limits = c(0, 24), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(0, 1), expand = c(0, 0))
+}
+
+ls_p_smoking <- vector("list", length(all_cancertypes_fct))
+names(ls_p_smoking) <- all_cancertypes_fct
+
+for (i in seq_along(all_cancertypes_fct)) {
+  # i <- 21
+  cancertype <- all_cancertypes_fct[i]
+  df_sample <- df_avail %>% 
+    filter(cancertype_CCAT == cancertype)
+  ls_p_smoking[[i]] <- DrawSurvplotSmoking(df_sample, xlimit = 24, str_glue("{cancertype}")) 
+}
+
+pdf(str_glue("{outdir_pdf}/C-CAT_smoking_survival_OSfromCGP_pancan.pdf"), width = 25, height = 25)
+wrap_plots(ls_p_smoking, nrow = 3)
+dev.off()
+
+```
+
+# Kaplan-Meier analysis for alcohol use
+
+```{r alcohol}
+
+# Function to draw survival plot for alcohol use
+DrawSurvplotAlcohol <- function(df_sample, xlimit, mytitle) {
+  df_tmp <- df_sample %>% 
+    mutate(alcohol_status = factor(alcohol_status, levels = c("FALSE", "TRUE")))
+  ever_n <- nrow(df_tmp[df_tmp$alcohol_status == "TRUE", ])
+  never_n <- nrow(df_tmp[df_tmp$alcohol_status == "FALSE", ])
+
+  mysurvfit_alcohol <- coxph(Surv(OS_months, OS) ~ alcohol_status + smoking_status_2groups + Age + PS_group, data = as.data.frame(df_tmp))
+  mysurvfit_for_plot <- survfit(Surv(OS_months, OS) ~ alcohol_status, data = as.data.frame(df_tmp))
+  label_text <- str_glue("TvsF P (Alc,S,Age,PS)= {attach_astk(summary(mysurvfit_alcohol)$coefficients[1, 5])}")
+
+  ggsurvplot(
+    mysurvfit_for_plot,
+    data = df_tmp,
+    pval = FALSE,
+    risk.table = TRUE,
+    title = str_glue("{mytitle}"),
+    subtitle = str_glue("TRUE: {ever_n}, FALSE: {never_n}"),
+    caption = str_glue("{label_text}"),
+    font.subtitle = c(size = 12),
+    font.caption = c(size = 12),
+    xlim = c(0, xlimit),
+    break.x.by = 10,
+    palette = c("#8DA0CB", "#A6D854"),
+    censor = FALSE,
+    xlab = "Months",
+    ylab = "OS probability",
+    legend = "none"
+  )$plot +
+    theme(aspect.ratio = 1) +
+    scale_x_continuous(limits = c(0, 24), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(0, 1), expand = c(0, 0))
+}
+
+ls_p_alcohol <- vector("list", length(all_cancertypes_fct))
+names(ls_p_alcohol) <- all_cancertypes_fct
+
+for (i in seq_along(all_cancertypes_fct)) {
+  cancertype <- all_cancertypes_fct[i]
+  df_sample <- df_avail %>% 
+    filter(cancertype_CCAT == cancertype)
+  ls_p_alcohol[[i]] <- DrawSurvplotAlcohol(df_sample, xlimit = 24, str_glue("{cancertype}")) 
+}
+
+pdf(str_glue("{outdir_pdf}/C-CAT_alcohol_survival_OSfromCGP_pancan.pdf"), width = 25, height = 25)
+wrap_plots(ls_p_alcohol, nrow = 3)
+dev.off()
+
+```
+
+# Multivariate analysis for smoking
+
+```{r multivariate analysis}
+ls_df_res_smoking <- vector("list", length(all_cancertypes_fct))
+
+PerformSurvSmoking <- function(mydf, mycancertype) {
+  # mydf <- df_LUSC_mut
+  # mycancertype <- "LUSC"
+  df_res <- tibble(
+    cancertype = mycancertype,
+    sample_num = nrow(mydf),
+    ever_num = NA_integer_,
+    never_num = NA_integer_,
+    hr_coxph = NA_real_,
+    hr_coxph_conf_low = NA_real_,
+    hr_coxph_conf_high = NA_real_,
+    pval_coxph = NA_real_
+  )
+
+  df_res$ever_num[1] <- nrow(mydf %>% filter(smoking_status_2groups == "Ever"))
+  df_res$never_num[1] <- nrow(mydf %>% filter(smoking_status_2groups == "Never"))
+
+  fit <- coxph(Surv(OS_months, OS) ~ smoking_status_2groups + alcohol_status + Age + PS_group, data = mydf)
+  df_model_tmp <- broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE)
+  df_res$hr_coxph[1] <- df_model_tmp$estimate[df_model_tmp$term == "smoking_status_2groupsEver"]
+  df_res$hr_coxph_conf_low[1] <- df_model_tmp$conf.low[df_model_tmp$term == "smoking_status_2groupsEver"]
+  df_res$hr_coxph_conf_high[1] <- df_model_tmp$conf.high[df_model_tmp$term == "smoking_status_2groupsEver"]
+  df_res$pval_coxph[1] <- df_model_tmp$p.value[df_model_tmp$term == "smoking_status_2groupsEver"]
+  return(df_res)
+}
+
+for (i in seq_along(all_cancertypes_fct)) {
+    # i <- 1
+  cancertype <- all_cancertypes_fct[i]
+  df_tmp <- df_avail %>% 
+    filter(cancertype_CCAT == cancertype)
+  ls_df_res_smoking[[i]] <- PerformSurvSmoking(df_tmp, cancertype)
+}
+
+df_res_smoking <- bind_rows(ls_df_res_smoking) 
+names(df_res_smoking)
+df_res_smoking %>% 
+  write_tsv(str_glue("{outdir_table}/C-CAT_survival_OSfromCGP_smoking_comparison.tsv"))
+
+```
+
+# Multivariate analysis for alcohol use
+
+```{r alcohol}
+ls_df_res_alcohol <- vector("list", length(all_cancertypes_fct))
+names(ls_df_res_alcohol) <- all_cancertypes_fct
+
+PerformSurvAlcohol <- function(mydf, mycancertype) {
+  # mydf <- df_sample
+  # mycancertype <- "ESCC"
+  df_res <- tibble(
+    cancertype = mycancertype,
+    term = "alcohol",
+    sample_num = nrow(mydf),
+    true_num = NA_integer_,
+    false_num = NA_integer_,
+    hr_coxph = NA_real_,
+    hr_coxph_conf_low = NA_real_,
+    hr_coxph_conf_high = NA_real_,
+    pval_coxph = NA_real_
+  )
+
+  df_res$true_num[1] <- nrow(mydf %>% filter(alcohol_status == "TRUE"))
+  df_res$false_num[1] <- nrow(mydf %>% filter(alcohol_status == "FALSE"))
+
+  fit <- coxph(Surv(OS_months, OS) ~ alcohol_status + smoking_status_2groups + Age + PS_group, data = mydf)
+  df_model_tmp <- broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE)
+  df_res$hr_coxph[1] <- df_model_tmp$estimate[df_model_tmp$term == "alcohol_statusTRUE"]
+  df_res$hr_coxph_conf_low[1] <- df_model_tmp$conf.low[df_model_tmp$term == "alcohol_statusTRUE"]
+  df_res$hr_coxph_conf_high[1] <- df_model_tmp$conf.high[df_model_tmp$term == "alcohol_statusTRUE"]
+  df_res$pval_coxph[1] <- df_model_tmp$p.value[df_model_tmp$term == "alcohol_statusTRUE"]
+
+  return(df_res)
+}
+
+for (i in seq_along(all_cancertypes_fct)) {
+    # i <- 1
+  cancertype <- all_cancertypes_fct[i]
+  df_tmp <- df_avail %>% 
+    filter(cancertype_CCAT == cancertype)
+  ls_df_res_alcohol[[i]] <- PerformSurvAlcohol(df_tmp, cancertype)
+}
+
+df_res_alcohol <- bind_rows(ls_df_res_alcohol) %>%
+  complete(cancertype = all_cancertypes_fct)
+
+df_res_alcohol %>% 
+  write_tsv(str_glue("{outdir_table}/C-CAT_survival_OSfromCGP_alcohol_comparison.tsv"))
+
+```
+
+```{r sessioninfo}
+
+sessionInfo()
+
+```

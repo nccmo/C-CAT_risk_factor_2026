@@ -1,0 +1,257 @@
+---
+title: "Driver mutation enrichment"
+author: "Yosuke Mizukami"
+date: "2025-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+```{r library, message=FALSE, warning=TRUE}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(broom)
+library(cowplot)
+theme_set(theme_cowplot())
+library(RColorBrewer)
+library(logging)
+library(lawstat)
+library(DescTools)
+library(MASS)
+library(ggrepel)
+```
+
+```{r source}
+source("../../util/R/utils.R")
+source("../../util/R/figure.R")
+source("../../util/R/colors.R")
+source("../../util/R/readin.R")
+```
+
+```{r make directory}
+# make directory
+outdir0 <- "result/2_C_CAT/1_pancan/1_mutation/5_1_driver_enrichment_q005"
+outdir_table <- str_glue("{outdir0}/table")
+dir.create(outdir_table, recursive = TRUE, showWarnings = FALSE)
+outdir_pdf <- str_glue("{outdir0}/pdf")
+dir.create(outdir_pdf, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Prepare a driver list
+
+```{r read data}
+all_cancertypes_fct <- unique(df$cancertype_CCAT) %>% sort()
+df_driver <- read_tsv("result/1_data_preparation/C_CAT_tissue/driver_creation/table/driver_genes_per_cancertype_final.tsv") %>% 
+  filter(cancertype_CCAT %in% all_cancertypes_fct) 
+```
+
+# Univariate analysis
+
+```{r univariate analysis}
+
+EvaluateSNVenrichment <- function(df_input, mycancertype, mycolname) {
+  df_filt <- df_input %>%
+    filter(cancertype_CCAT == mycancertype) 
+  samples0 <- df_filt %>%
+    filter(!!sym(mycolname) == 0) %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  samples1 <- df_filt %>%
+    filter(!!sym(mycolname) == 1) %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+  
+  driver_muts <- df_driver %>% 
+    filter(cancertype_CCAT == mycancertype) %>% 
+    pull(Gene)
+  
+  df_mut_agg <- tibble(
+    Gene = driver_muts,
+    num_alt_0 = NA_real_,
+    num_alt_1 = NA_real_,
+    num_wt_0 = NA_real_,
+    num_wt_1 = NA_real_
+  )
+  
+  for (i in seq_along(driver_muts)) {
+    SNV_i <- driver_muts[i]
+    alt_samples0 <- df_mut %>%
+      filter(Tumor_Sample_Barcode %in% samples0, Marker == SNV_i) %>%
+      pull(Tumor_Sample_Barcode) %>%
+      unique()
+    alt_samples1 <- df_mut %>%
+      filter(Tumor_Sample_Barcode %in% samples1, Marker == SNV_i) %>%
+      pull(Tumor_Sample_Barcode) %>%
+      unique()
+    
+    wt_samples0 <- setdiff(samples0, alt_samples0)
+    wt_samples1 <- setdiff(samples1, alt_samples1)
+
+    df_mut_agg[i, "num_alt_0"] <- length(alt_samples0)
+    df_mut_agg[i, "num_alt_1"] <- length(alt_samples1)
+    df_mut_agg[i, "num_wt_0"] <- length(wt_samples0)
+    df_mut_agg[i, "num_wt_1"] <- length(wt_samples1)
+  }
+
+  offset <- 0.01
+  df_mut_fisher_res <- df_mut_agg %>% 
+    mutate(
+      fisher_res = pmap(
+        list(num_wt_0, num_alt_0, num_wt_1, num_alt_1),
+        function(a, b, c, d) {
+          mat <- matrix(c(a, b, c, d), nrow = 2)
+          fisher.test(mat)
+        }
+      ),
+      fisher_p = map_dbl(fisher_res, ~ .x$p.value),
+
+      fisher_or = pmap_dbl(
+        list(num_wt_0, num_alt_0, num_wt_1, num_alt_1),
+        function(a, b, c, d) {
+          ((a + offset) * (d + offset)) / ((b + offset) * (c + offset))
+        }
+      )
+    ) %>%
+    dplyr::select(-fisher_res) %>%
+    mutate(
+      cancertype = mycancertype,
+      variable = mycolname
+    )
+  
+  return(df_mut_fisher_res)
+}
+
+ls_df_mut_fisher_smoking <- vector("list", length(all_cancertypes_fct))
+ls_df_mut_fisher_alcohol <- vector("list", length(all_cancertypes_fct))
+
+for (i in seq_along(all_cancertypes_fct)) {
+  # i <- 1
+  ls_df_mut_fisher_smoking[[i]] <- EvaluateSNVenrichment(df, all_cancertypes_fct[[i]], "Smoking")
+  ls_df_mut_fisher_alcohol[[i]] <- EvaluateSNVenrichment(df, all_cancertypes_fct[[i]], "Alcohol")
+}
+
+RenameColnames <- function(ls_df_input, mycolname, terms) {
+  # ls_df_input <- ls_df_mut_fisher_smoking
+  # mycolname <- "smoking"
+  # terms <- c("never", "ever")
+  
+  df_input <- bind_rows(ls_df_input) %>%
+    mutate(fisher_q_all = p.adjust(fisher_p, method = "BH"))
+  
+  # Define the new column names to match the required naming
+  new_names <- c(
+    str_glue("num_samples_alt_{terms[2]}"), # 1 → ever, excessive
+    str_glue("num_samples_wt_{terms[2]}"),
+    str_glue("num_samples_alt_{terms[1]}"), # 0 → never, non_excessive
+    str_glue("num_samples_wt_{terms[1]}"),
+    str_glue("fisher_or_{mycolname}"),
+    str_glue("fisher_p_{mycolname}"),
+    str_glue("fisher_q_all_{mycolname}")
+  )
+  
+  old_names <- c(
+    "num_alt_1", "num_wt_1",
+    "num_alt_0", "num_wt_0",
+    "fisher_or", "fisher_p", "fisher_q_all"
+  )
+  
+  df_input2 <- df_input %>% dplyr::rename(!!!setNames(old_names, new_names))
+  
+  df_input_select <- df_input2 %>%
+    dplyr::select(Gene, cancertype, all_of(new_names))
+  
+  return(df_input_select)
+}
+
+df_mut_fisher_smoking <- RenameColnames(ls_df_mut_fisher_smoking, "smoking", c("never", "ever"))
+df_mut_fisher_alcohol <- RenameColnames(ls_df_mut_fisher_alcohol, "alcohol", c("non_excessive", "excessive"))
+
+df_mut_fisher_uni <- df_mut_fisher_smoking %>%
+  left_join(df_mut_fisher_alcohol, by = c("Gene", "cancertype"))
+
+```
+
+# Multivariate analysis
+
+```{r multivariate analysis}
+
+df_combinations <- df_mut_fisher_uni %>%
+  dplyr::select(Gene, cancertype) 
+  
+ls_df_res_lm <- vector("list", nrow(df_combinations))
+for (i in seq_len(nrow(df_combinations))) {
+  # i <- 185
+  gene_i <- df_combinations$Gene[i]
+  cancer_i <- df_combinations$cancertype[i]
+  # gene_i <- "EGFR"
+  # cancer_i <- "NSCLC"
+
+  samples_tmp <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    pull(Tumor_Sample_Barcode) %>%
+    unique()
+
+  df_mut_tmp <- df_mut %>%
+    filter(Marker == gene_i) %>%
+    filter(Tumor_Sample_Barcode %in% samples_tmp)
+  
+  df_subset <- df %>%
+    filter(cancertype_CCAT == cancer_i) %>%
+    mutate(Alteration = if_else(Tumor_Sample_Barcode %in% df_mut_tmp$Tumor_Sample_Barcode, 1, 0)) %>% 
+    mutate(
+      Alteration = as.integer(Alteration),
+      smoking_status_2groups = factor(smoking_status_2groups, c("Never", "Ever")),
+      alcohol_status = factor(alcohol_status, c("FALSE", "TRUE"))
+    )
+
+  get_term_row <- function(df_model, term_label) {
+    row <- df_model %>% filter(term == term_label)
+    if (nrow(row) == 0) {
+      tibble(estimate = NA_real_, p.value = NA_real_)
+    } else {
+      row
+    }
+  }
+
+  model_comb_age <- glm(Alteration ~ smoking_status_2groups + alcohol_status + Age, data = df_subset, family = binomial)
+  df_model_comb_age <- broom::tidy(model_comb_age)
+  df_row_smoking <- get_term_row(df_model_comb_age, "smoking_status_2groupsEver")
+  df_row_alcohol <- get_term_row(df_model_comb_age, "alcohol_statusTRUE")
+
+  ls_df_res_lm[[i]] <- tibble(
+    Gene = gene_i,
+    cancertype = cancer_i,
+    OR_smoking_multivar_alcsmkage = exp(df_row_smoking$estimate),
+    pval_smoking_multivar_alcsmkage = df_row_smoking$p.value,
+    OR_alcohol_multivar_alcsmkage = exp(df_row_alcohol$estimate),
+    pval_alcohol_multivar_alcsmkage = df_row_alcohol$p.value
+  )
+}
+
+df_res_lm0 <- bind_rows(ls_df_res_lm)
+
+df_mut_fisher_multi <- df_res_lm0 %>%
+  mutate(
+    qval_all_smoking_multivar_alcsmkage = p.adjust(pval_smoking_multivar_alcsmkage, method = "BH"),
+    qval_all_alcohol_multivar_alcsmkage = p.adjust(pval_alcohol_multivar_alcsmkage, method = "BH")
+  )
+
+df_fisher_merged <- df_mut_fisher_uni %>%
+  left_join(df_mut_fisher_multi, by = c("cancertype", "Gene"))
+
+df_fisher_merged %>% 
+  write_tsv(str_glue("{outdir_table}/driver_mutation_enrichment_univariate_multivariate.tsv"))
+
+```
+
+
+```{r sessioninfo}
+
+sessionInfo()
+
+```
